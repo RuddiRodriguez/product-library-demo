@@ -20,11 +20,15 @@ QUERIES = {
 }
 
 
-def get_data(url, params=None):
+def get_data(url, params=None, allow_missing=False):
+    """Read an API response. Only optional repository/file lookups allow 404."""
     headers = {"User-Agent": "product-library-demo"}
+    # Keep the GitHub token away from requests to other sources.
     if urlsplit(url).hostname == "api.github.com" and os.getenv("GITHUB_TOKEN"):
         headers["Authorization"] = f"Bearer {os.environ['GITHUB_TOKEN']}"
     response = requests.get(url, params=params, headers=headers, timeout=30)
+    if allow_missing and response.status_code == 404:
+        return None, response.url
     response.raise_for_status()
     return response.json(), response.url
 
@@ -41,8 +45,10 @@ def repository_key(url):
 
 
 def discover(count):
+    """Collect the two sources, then follow a few repository and licence links."""
     records = []
     checked_at = datetime.now(timezone.utc).isoformat()
+    # Search each topic separately so an entry can keep both categories.
     for category, query in QUERIES.items():
         data, url = get_data(f"{GITHUB}/search/repositories", {
             "q": query, "sort": "stars", "per_page": count,
@@ -53,6 +59,7 @@ def discover(count):
                         "category": category, "data": item} for item in data["items"])
         print(f"GitHub / {category}: {len(data['items'])}")
 
+    # Follow registry pages until we reach the requested sample size.
     params = {"limit": count, "version": "latest"}
     servers = []
     while len(servers) < count:
@@ -68,17 +75,17 @@ def discover(count):
     records.extend(servers)
     print(f"MCP Registry: {len(servers)}")
 
-    linked_repos = list(dict.fromkeys(
+    # Keep distinct GitHub links in discovery order, then look up the first five.
+    repository_urls = (
         repository_key(item["data"]["server"].get("repository", {}).get("url", ""))
         for item in servers
-    ))
+    )
+    linked_repos = dict.fromkeys(url for url in repository_urls if url.startswith("https://github.com/"))
     skipped = []
-    for repo in [url for url in linked_repos if url.startswith("https://github.com/")][:5]:
-        try:
-            data, url = get_data(f"{GITHUB}/repos/{urlsplit(repo).path.strip('/')}")
-        except requests.HTTPError as error:
-            if error.response.status_code != 404:
-                raise
+    for repo in list(linked_repos)[:5]:
+        name = urlsplit(repo).path.strip("/")
+        data, url = get_data(f"{GITHUB}/repos/{name}", allow_missing=True)
+        if data is None:
             skipped.append(repo)
             continue
         records.append({"source": "GitHub", "source_url": url,
@@ -90,18 +97,14 @@ def discover(count):
     ))[:10]
     licenses = {}
     for name in repositories:
-        try:
-            data, _ = get_data(f"{GITHUB}/repos/{name}/license")
-        except requests.HTTPError as error:
-            if error.response.status_code != 404:
-                raise
-            data = None
+        data, _ = get_data(f"{GITHUB}/repos/{name}/license", allow_missing=True)
         licenses[repository_key(f"https://github.com/{name}")] = data
     return {"checked_at": checked_at, "records": records, "licenses": licenses,
             "unavailable_repository_links": skipped}
 
 
 def normalize(item, snapshot):
+    """Give both sources the same field names without inventing missing details."""
     data = item["data"]
     if item["source"] == "GitHub":
         repo = repository_key(data["html_url"])
@@ -115,11 +118,13 @@ def normalize(item, snapshot):
             "tags": data.get("topics", []), "language": data.get("language") or "",
         }
         license_file = snapshot["licenses"].get(repo)
+        # A direct file is stronger evidence than the repository's licence label.
         if license_file:
             record["license"] = license_file["license"]["spdx_id"]
             record["license_evidence"] = license_file["html_url"]
             record["license_evidence_type"] = "GitHub licence file"
     else:
+        # A registry entry stays separate from its linked GitHub repository.
         server = data["server"]
         metadata = data["_meta"]["io.modelcontextprotocol.registry/official"]
         repo = repository_key(server.get("repository", {}).get("url", ""))
@@ -132,6 +137,8 @@ def normalize(item, snapshot):
             "license_evidence_type": "Not checked", "stars": None,
             "updated_at": metadata["updatedAt"], "tags": [], "language": "",
         }
+    # These tracking fields work the same way for both sources.
+    # Finding a licence never approves commercial use or resale.
     record.update({
         "group_id": repo or record["id"], "categories": [item["category"]],
         "sources": [item["source"]], "source_urls": [item["source_url"]],
@@ -147,7 +154,8 @@ def merge_records(records):
     for record in records:
         previous = unique.get(record["id"])
         if previous:
-            record = dict(record)
+            # Update details, but retain the first discovery and all source links.
+            record = record.copy()
             record["first_seen"] = previous["first_seen"]
             for field in ("categories", "sources", "source_urls"):
                 record[field] = sorted(set(previous[field] + record[field]))
@@ -156,6 +164,7 @@ def merge_records(records):
 
 
 def summarize(snapshot, current, library):
+    """Count discoveries, related repositories and available licence evidence."""
     groups = {}
     for record in library:
         groups.setdefault(record["group_id"], set()).update(record["sources"])
@@ -174,6 +183,10 @@ def summarize(snapshot, current, library):
     }
 
 
+def load_json(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def save_json(path, data):
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -186,16 +199,21 @@ def main():
     parser.add_argument("--output", type=Path, default=DATA)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+
+    # Use the saved responses for offline runs; otherwise collect a fresh sample.
     raw_path = args.output / "raw.json"
-    snapshot = json.loads(raw_path.read_text()) if args.offline else discover(args.count)
+    snapshot = load_json(raw_path) if args.offline else discover(args.count)
     current = merge_records([normalize(item, snapshot) for item in snapshot["records"]])
+
+    # Merge into the existing library so repeated runs update rather than duplicate.
     library_path = args.output / "library.json"
-    previous = json.loads(library_path.read_text()) if library_path.exists() else []
+    previous = load_json(library_path) if library_path.exists() else []
     library = merge_records(previous + current)
     summary = summarize(snapshot, current, library)
     save_json(raw_path, snapshot)
     save_json(library_path, library)
     save_json(args.output / "summary.json", summary)
+    # CSV needs text cells, so join list fields such as tags and discovery URLs.
     with (args.output / "library.csv").open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=list(library[0]), lineterminator="\n")
         writer.writeheader()

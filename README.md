@@ -133,6 +133,8 @@ The app always reads `data/`. An alternative output folder is for command-line e
 
 There are no custom classes or application framework layers. JSON files keep the demo easy to inspect. PostgreSQL would make sense for a larger system, but is unnecessary for this sample.
 
+The code uses ordinary functions, comprehensions, dictionaries and `pathlib`. Shared helpers read JSON and handle API responses; comments explain the discovery steps, grouping decisions and licence boundaries. Filters are applied separately, and labels are kept beside the values they display.
+
 ### Deduplication versus grouping
 
 - GitHub entries use GitHub's numeric repository ID. The same repository found in both topic searches becomes one entry, keeping both category labels and discovery URLs.
@@ -192,6 +194,8 @@ Four checks passed for the included version:
 4. The app loads, filters registry entries and handles a search with no matches.
 
 The real collection run and browser preview were also checked. No million-record load test was performed.
+
+After simplifying the code, an additional comparison against the original version confirmed byte-for-byte identical JSON/CSV exports and identical discovery results using recorded responses across two registry pages. Optional missing-file responses and API error handling were also checked. This comparison used saved responses, not a new live collection.
 
 ## Deliberate limits
 
