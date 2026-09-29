@@ -1,0 +1,13 @@
+{
+  "checked_at": "2026-09-29T09:31:31.035189+00:00",
+  "raw_this_run": 304,
+  "unique_this_run": 299,
+  "duplicates_this_run": 5,
+  "library_records": 299,
+  "repository_or_standalone_groups": 277,
+  "groups_in_both_sources": 4,
+  "license_identified": 169,
+  "license_files_found_this_run": 10,
+  "review_required": 299,
+  "manually_verified": 0
+}
